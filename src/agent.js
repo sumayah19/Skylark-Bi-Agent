@@ -1,16 +1,16 @@
-const { GoogleGenerativeAI, SchemaType } = require('@google/generative-ai');
+const { GoogleGenAI, Type } = require('@google/genai');
 const ds = require('./dataService');
 
-const genAI = new GoogleGenerativeAI(process.env.GEMINI_API_KEY);
+const ai = new GoogleGenAI({ apiKey: process.env.GEMINI_API_KEY });
 
-// Try the configured model first, then fall back through these if it's
-// overloaded (503) or retired (404). Order: configured -> known-current stable ones.
+// Try the configured model first, then fall back through these current
+// stable models if one is overloaded (503) or retired (404).
 const MODEL_CANDIDATES = [
   process.env.GEMINI_MODEL,
   'gemini-3.6-flash',
   'gemini-3.7-flash',
+  'gemini-2.5-flash-lite',
   'gemini-flash-latest',
-  'gemini-flash-lite-latest',
 ].filter(Boolean);
 
 const SYSTEM_PROMPT = `You are Skylark Drones' internal Business Intelligence agent. You answer
@@ -38,25 +38,23 @@ Rules:
   then data caveats.
 - Be concise. Executives want the answer and the "so what", not a data dump.`;
 
-// Gemini's function-declaration schema uses the SchemaType enum instead of
-// lowercase JSON-Schema type strings. Same tool set/behavior as the
-// original Claude version -- just described in Gemini's shape.
+// @google/genai's function-declaration schema uses the Type enum.
 const TOOLS = [
   {
     name: 'summarize_deals',
     description: 'Aggregate the Deals (pipeline) board. Filter and group to answer questions about pipeline health, sector performance, win rate, revenue by stage, owner performance, etc. Returns grouped counts/sums plus a data-quality note.',
     parameters: {
-      type: SchemaType.OBJECT,
+      type: Type.OBJECT,
       properties: {
-        sector: { type: SchemaType.STRING, description: 'e.g. Mining, Renewables, Powerline, Railways, Construction, DSP, Others' },
-        status: { type: SchemaType.STRING, description: 'Deal Status value, e.g. Open, Won, Dead, On Hold' },
-        owner: { type: SchemaType.STRING, description: 'Owner code, e.g. OWNER_001' },
-        dateField: { type: SchemaType.STRING, description: 'One of: closeDate, tentativeCloseDate, createdDate' },
-        dateFrom: { type: SchemaType.STRING, description: 'ISO date, inclusive lower bound' },
-        dateTo: { type: SchemaType.STRING, description: 'ISO date, inclusive upper bound' },
-        groupBy: { type: SchemaType.STRING, description: 'One of: sector, status, stage, ownerCode, product' },
-        valueField: { type: SchemaType.STRING, description: 'Only dealValue exists as a numeric field' },
-        agg: { type: SchemaType.STRING, description: 'One of: count, sum, avg' },
+        sector: { type: Type.STRING, description: 'e.g. Mining, Renewables, Powerline, Railways, Construction, DSP, Others' },
+        status: { type: Type.STRING, description: 'Deal Status value, e.g. Open, Won, Dead, On Hold' },
+        owner: { type: Type.STRING, description: 'Owner code, e.g. OWNER_001' },
+        dateField: { type: Type.STRING, description: 'One of: closeDate, tentativeCloseDate, createdDate' },
+        dateFrom: { type: Type.STRING, description: 'ISO date, inclusive lower bound' },
+        dateTo: { type: Type.STRING, description: 'ISO date, inclusive upper bound' },
+        groupBy: { type: Type.STRING, description: 'One of: sector, status, stage, ownerCode, product' },
+        valueField: { type: Type.STRING, description: 'Only dealValue exists as a numeric field' },
+        agg: { type: Type.STRING, description: 'One of: count, sum, avg' },
       },
     },
   },
@@ -64,17 +62,17 @@ const TOOLS = [
     name: 'summarize_work_orders',
     description: 'Aggregate the Work Orders (execution/billing) board. Use for questions about execution status, billing/collections, sector delivery load, and operational metrics.',
     parameters: {
-      type: SchemaType.OBJECT,
+      type: Type.OBJECT,
       properties: {
-        sector: { type: SchemaType.STRING },
-        status: { type: SchemaType.STRING, description: 'Execution Status, e.g. Ongoing, Completed, Not Started, Pause / struck' },
-        owner: { type: SchemaType.STRING },
-        dateField: { type: SchemaType.STRING, description: 'Only lastInvoiceDate is available on this board' },
-        dateFrom: { type: SchemaType.STRING },
-        dateTo: { type: SchemaType.STRING },
-        groupBy: { type: SchemaType.STRING, description: 'One of: sector, executionStatus, natureOfWork, ownerCode, invoiceStatus' },
-        valueField: { type: SchemaType.STRING, description: 'One of: amountExGst, amountIncGst, billedExGst, collectedIncGst' },
-        agg: { type: SchemaType.STRING, description: 'One of: count, sum, avg' },
+        sector: { type: Type.STRING },
+        status: { type: Type.STRING, description: 'Execution Status, e.g. Ongoing, Completed, Not Started, Pause / struck' },
+        owner: { type: Type.STRING },
+        dateField: { type: Type.STRING, description: 'Only lastInvoiceDate is available on this board' },
+        dateFrom: { type: Type.STRING },
+        dateTo: { type: Type.STRING },
+        groupBy: { type: Type.STRING, description: 'One of: sector, executionStatus, natureOfWork, ownerCode, invoiceStatus' },
+        valueField: { type: Type.STRING, description: 'One of: amountExGst, amountIncGst, billedExGst, collectedIncGst' },
+        agg: { type: Type.STRING, description: 'One of: count, sum, avg' },
       },
     },
   },
@@ -82,12 +80,12 @@ const TOOLS = [
     name: 'list_records',
     description: 'Return a small number of raw, normalized records (not aggregated) for spot-checking or when the user asks about specific named deals/clients. Use sparingly and with a limit.',
     parameters: {
-      type: SchemaType.OBJECT,
+      type: Type.OBJECT,
       properties: {
-        board: { type: SchemaType.STRING, description: 'deals or work_orders' },
-        sector: { type: SchemaType.STRING },
-        status: { type: SchemaType.STRING },
-        limit: { type: SchemaType.NUMBER },
+        board: { type: Type.STRING, description: 'deals or work_orders' },
+        sector: { type: Type.STRING },
+        status: { type: Type.STRING },
+        limit: { type: Type.NUMBER },
       },
       required: ['board'],
     },
@@ -95,12 +93,12 @@ const TOOLS = [
   {
     name: 'pipeline_to_execution_conversion',
     description: 'Cross-board join: for "Won" deals, checks whether a matching Work Order exists (matched by deal name / client code). Answers questions like "are we executing on what we sell?" or "which won deals haven\'t kicked off yet".',
-    parameters: { type: SchemaType.OBJECT, properties: {} },
+    parameters: { type: Type.OBJECT, properties: {} },
   },
   {
     name: 'build_leadership_snapshot',
     description: 'Builds a structured leadership-ready snapshot: pipeline by stage & sector, execution status breakdown, billing/collection health, and top data-quality caveats. Use when asked to prepare a leadership/exec update.',
-    parameters: { type: SchemaType.OBJECT, properties: {} },
+    parameters: { type: Type.OBJECT, properties: {} },
   },
 ];
 
@@ -177,9 +175,9 @@ async function runTool(name, input) {
   throw new Error(`Unknown tool: ${name}`);
 }
 
-// Gemini's chat history uses {role: 'user'|'model', parts: [...]}. Our
-// frontend sends {role: 'user'|'assistant', content: string} -- translate.
-function toGeminiHistory(history) {
+// @google/genai's chat history uses {role: 'user'|'model', parts: [...]}.
+// Our frontend sends {role: 'user'|'assistant', content: string} -- translate.
+function toGenaiHistory(history) {
   return history.map((m) => ({
     role: m.role === 'assistant' ? 'model' : 'user',
     parts: [{ text: m.content }],
@@ -204,12 +202,14 @@ async function sendWithFallback(sendFn) {
   for (let i = 0; i < MODEL_CANDIDATES.length; i += 1) {
     const modelName = MODEL_CANDIDATES[i];
     try {
-      const model = genAI.getGenerativeModel({
+      const chat = ai.chats.create({
         model: modelName,
-        systemInstruction: SYSTEM_PROMPT,
-        tools: [{ functionDeclarations: TOOLS }],
+        config: {
+          systemInstruction: SYSTEM_PROMPT,
+          tools: [{ functionDeclarations: TOOLS }],
+        },
       });
-      return await sendFn(model);
+      return await sendFn(chat);
     } catch (err) {
       lastErr = err;
       if (!isRetryableError(err)) throw err; // a real bug -- surface it, don't mask it
@@ -220,23 +220,28 @@ async function sendWithFallback(sendFn) {
 }
 
 async function chat(history) {
-  const geminiHistory = toGeminiHistory(history);
-  const lastUserMsg = geminiHistory.pop(); // last turn sent via sendMessage, rest is history
+  const genaiHistory = toGenaiHistory(history);
+  const lastUserMsg = genaiHistory.pop(); // last turn sent via sendMessage, rest is history
 
   let session;
-  let result = await sendWithFallback(async (model) => {
-    session = model.startChat({ history: geminiHistory });
-    return session.sendMessage(lastUserMsg.parts);
+  let result = await sendWithFallback(async (chatSession) => {
+    session = chatSession;
+    // Seed prior turns (if any) before sending the newest message.
+    for (const turn of genaiHistory) {
+      // eslint-disable-next-line no-await-in-loop
+      await session.sendMessage({ message: turn.parts });
+    }
+    return session.sendMessage({ message: lastUserMsg.parts });
   });
 
   // Agentic tool-use loop, capped so a confused model can't spin forever.
   for (let turn = 0; turn < 6; turn += 1) {
-    const calls = result.response.functionCalls();
+    const calls = result.functionCalls;
     if (!calls || calls.length === 0) {
-      return { reply: result.response.text(), mockMode: ds.isMockMode() };
+      return { reply: result.text, mockMode: ds.isMockMode() };
     }
 
-    const functionResponses = [];
+    const functionResponseParts = [];
     for (const call of calls) {
       let output;
       try {
@@ -244,9 +249,10 @@ async function chat(history) {
       } catch (err) {
         output = { error: err.message };
       }
-      functionResponses.push({ functionResponse: { name: call.name, response: output } });
+      functionResponseParts.push({ functionResponse: { name: call.name, response: output } });
     }
-    result = await session.sendMessage(functionResponses);
+    // eslint-disable-next-line no-await-in-loop
+    result = await session.sendMessage({ message: functionResponseParts });
   }
 
   return { reply: "I wasn't able to settle on an answer within my tool-call budget -- try narrowing the question.", mockMode: ds.isMockMode() };
