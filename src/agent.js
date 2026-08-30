@@ -1,7 +1,7 @@
 const Anthropic = require('@anthropic-ai/sdk');
 const ds = require('./dataService');
 
-const client = new Anthropic({ apiKey: process.env.ANTHROPIC_API_KEY });
+const client = new Anthropic({ apiKey: process.env.GEMINI_API_KEY});
 const MODEL = 'claude-sonnet-4-5-20250929';
 
 const SYSTEM_PROMPT = `You are Skylark Drones' internal Business Intelligence agent. You answer
