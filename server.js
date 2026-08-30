@@ -20,9 +20,9 @@ app.post('/api/chat', async (req, res) => {
     if (!Array.isArray(history) || history.length === 0) {
       return res.status(400).json({ error: 'Request body must include a non-empty `history` array.' });
     }
-    if (!process.env.ANTHROPIC_API_KEY) {
-      return res.status(500).json({ error: 'Server is missing ANTHROPIC_API_KEY. See README/.env.example.' });
-    }
+    if (!process.env.GEMINI_API_KEY) {
+  return res.status(500).json({ error: 'Server is missing GEMINI_API_KEY. See README/.env.example.' });
+}
     const result = await chat(history);
     res.json(result);
   } catch (err) {
