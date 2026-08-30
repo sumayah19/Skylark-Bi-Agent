@@ -2,7 +2,16 @@ const { GoogleGenerativeAI, SchemaType } = require('@google/generative-ai');
 const ds = require('./dataService');
 
 const genAI = new GoogleGenerativeAI(process.env.GEMINI_API_KEY);
-const MODEL = process.env.GEMINI_MODEL || 'gemini-2.0-flash';
+
+// Try the configured model first, then fall back through these if it's
+// overloaded (503) or retired (404). Order: configured -> known-current stable ones.
+const MODEL_CANDIDATES = [
+  process.env.GEMINI_MODEL,
+  'gemini-3.6-flash',
+  'gemini-3.7-flash',
+  'gemini-flash-latest',
+  'gemini-flash-lite-latest',
+].filter(Boolean);
 
 const SYSTEM_PROMPT = `You are Skylark Drones' internal Business Intelligence agent. You answer
 founder/exec-level questions by querying two live monday.com boards: "Deals"
@@ -177,18 +186,48 @@ function toGeminiHistory(history) {
   }));
 }
 
-async function chat(history) {
-  const model = genAI.getGenerativeModel({
-    model: MODEL,
-    systemInstruction: SYSTEM_PROMPT,
-    tools: [{ functionDeclarations: TOOLS }],
-  });
+function sleep(ms) {
+  return new Promise((resolve) => setTimeout(resolve, ms));
+}
 
+function isRetryableError(err) {
+  const msg = (err && err.message) || '';
+  return msg.includes('503') || msg.includes('overloaded') || msg.includes('high demand')
+    || msg.includes('404') || msg.includes('no longer available');
+}
+
+// Some errors (503 overloaded, 404 retired model) mean "try a different
+// model", not "the request is broken". This walks MODEL_CANDIDATES in
+// order until one actually responds, instead of failing the whole request.
+async function sendWithFallback(sendFn) {
+  let lastErr;
+  for (let i = 0; i < MODEL_CANDIDATES.length; i += 1) {
+    const modelName = MODEL_CANDIDATES[i];
+    try {
+      const model = genAI.getGenerativeModel({
+        model: modelName,
+        systemInstruction: SYSTEM_PROMPT,
+        tools: [{ functionDeclarations: TOOLS }],
+      });
+      return await sendFn(model);
+    } catch (err) {
+      lastErr = err;
+      if (!isRetryableError(err)) throw err; // a real bug -- surface it, don't mask it
+      await sleep(400); // brief pause before trying the next model
+    }
+  }
+  throw lastErr;
+}
+
+async function chat(history) {
   const geminiHistory = toGeminiHistory(history);
   const lastUserMsg = geminiHistory.pop(); // last turn sent via sendMessage, rest is history
-  const session = model.startChat({ history: geminiHistory });
 
-  let result = await session.sendMessage(lastUserMsg.parts);
+  let session;
+  let result = await sendWithFallback(async (model) => {
+    session = model.startChat({ history: geminiHistory });
+    return session.sendMessage(lastUserMsg.parts);
+  });
 
   // Agentic tool-use loop, capped so a confused model can't spin forever.
   for (let turn = 0; turn < 6; turn += 1) {
