@@ -1,8 +1,8 @@
-const Anthropic = require('@anthropic-ai/sdk');
+const { GoogleGenerativeAI, SchemaType } = require('@google/generative-ai');
 const ds = require('./dataService');
 
-const client = new Anthropic({ apiKey: process.env.GEMINI_API_KEY});
-const MODEL = 'claude-sonnet-4-5-20250929';
+const genAI = new GoogleGenerativeAI(process.env.GEMINI_API_KEY);
+const MODEL = process.env.GEMINI_MODEL || 'gemini-2.0-flash';
 
 const SYSTEM_PROMPT = `You are Skylark Drones' internal Business Intelligence agent. You answer
 founder/exec-level questions by querying two live monday.com boards: "Deals"
@@ -29,53 +29,56 @@ Rules:
   then data caveats.
 - Be concise. Executives want the answer and the "so what", not a data dump.`;
 
+// Gemini's function-declaration schema uses the SchemaType enum instead of
+// lowercase JSON-Schema type strings. Same tool set/behavior as the
+// original Claude version -- just described in Gemini's shape.
 const TOOLS = [
   {
     name: 'summarize_deals',
     description: 'Aggregate the Deals (pipeline) board. Filter and group to answer questions about pipeline health, sector performance, win rate, revenue by stage, owner performance, etc. Returns grouped counts/sums plus a data-quality note.',
-    input_schema: {
-      type: 'object',
+    parameters: {
+      type: SchemaType.OBJECT,
       properties: {
-        sector: { type: 'string', description: 'e.g. Mining, Renewables, Powerline, Railways, Construction, DSP, Others' },
-        status: { type: 'string', description: 'Deal Status value, e.g. Open, Won, Dead, On Hold' },
-        owner: { type: 'string', description: 'Owner code, e.g. OWNER_001' },
-        dateField: { type: 'string', enum: ['closeDate', 'tentativeCloseDate', 'createdDate'], description: 'Which date field to filter/report on' },
-        dateFrom: { type: 'string', description: 'ISO date, inclusive lower bound' },
-        dateTo: { type: 'string', description: 'ISO date, inclusive upper bound' },
-        groupBy: { type: 'string', enum: ['sector', 'status', 'stage', 'ownerCode', 'product'], description: 'Field to group results by' },
-        valueField: { type: 'string', enum: ['dealValue'], description: 'Numeric field to sum/avg (only dealValue exists)' },
-        agg: { type: 'string', enum: ['count', 'sum', 'avg'], description: 'Aggregation to apply within each group' },
+        sector: { type: SchemaType.STRING, description: 'e.g. Mining, Renewables, Powerline, Railways, Construction, DSP, Others' },
+        status: { type: SchemaType.STRING, description: 'Deal Status value, e.g. Open, Won, Dead, On Hold' },
+        owner: { type: SchemaType.STRING, description: 'Owner code, e.g. OWNER_001' },
+        dateField: { type: SchemaType.STRING, description: 'One of: closeDate, tentativeCloseDate, createdDate' },
+        dateFrom: { type: SchemaType.STRING, description: 'ISO date, inclusive lower bound' },
+        dateTo: { type: SchemaType.STRING, description: 'ISO date, inclusive upper bound' },
+        groupBy: { type: SchemaType.STRING, description: 'One of: sector, status, stage, ownerCode, product' },
+        valueField: { type: SchemaType.STRING, description: 'Only dealValue exists as a numeric field' },
+        agg: { type: SchemaType.STRING, description: 'One of: count, sum, avg' },
       },
     },
   },
   {
     name: 'summarize_work_orders',
     description: 'Aggregate the Work Orders (execution/billing) board. Use for questions about execution status, billing/collections, sector delivery load, and operational metrics.',
-    input_schema: {
-      type: 'object',
+    parameters: {
+      type: SchemaType.OBJECT,
       properties: {
-        sector: { type: 'string' },
-        status: { type: 'string', description: 'Execution Status, e.g. Ongoing, Completed, Not Started, Pause / struck' },
-        owner: { type: 'string' },
-        dateField: { type: 'string', enum: ['lastInvoiceDate'], description: 'Only date field available on this board' },
-        dateFrom: { type: 'string' },
-        dateTo: { type: 'string' },
-        groupBy: { type: 'string', enum: ['sector', 'executionStatus', 'natureOfWork', 'ownerCode', 'invoiceStatus'] },
-        valueField: { type: 'string', enum: ['amountExGst', 'amountIncGst', 'billedExGst', 'collectedIncGst'] },
-        agg: { type: 'string', enum: ['count', 'sum', 'avg'] },
+        sector: { type: SchemaType.STRING },
+        status: { type: SchemaType.STRING, description: 'Execution Status, e.g. Ongoing, Completed, Not Started, Pause / struck' },
+        owner: { type: SchemaType.STRING },
+        dateField: { type: SchemaType.STRING, description: 'Only lastInvoiceDate is available on this board' },
+        dateFrom: { type: SchemaType.STRING },
+        dateTo: { type: SchemaType.STRING },
+        groupBy: { type: SchemaType.STRING, description: 'One of: sector, executionStatus, natureOfWork, ownerCode, invoiceStatus' },
+        valueField: { type: SchemaType.STRING, description: 'One of: amountExGst, amountIncGst, billedExGst, collectedIncGst' },
+        agg: { type: SchemaType.STRING, description: 'One of: count, sum, avg' },
       },
     },
   },
   {
     name: 'list_records',
     description: 'Return a small number of raw, normalized records (not aggregated) for spot-checking or when the user asks about specific named deals/clients. Use sparingly and with a limit.',
-    input_schema: {
-      type: 'object',
+    parameters: {
+      type: SchemaType.OBJECT,
       properties: {
-        board: { type: 'string', enum: ['deals', 'work_orders'] },
-        sector: { type: 'string' },
-        status: { type: 'string' },
-        limit: { type: 'integer', default: 10 },
+        board: { type: SchemaType.STRING, description: 'deals or work_orders' },
+        sector: { type: SchemaType.STRING },
+        status: { type: SchemaType.STRING },
+        limit: { type: SchemaType.NUMBER },
       },
       required: ['board'],
     },
@@ -83,16 +86,18 @@ const TOOLS = [
   {
     name: 'pipeline_to_execution_conversion',
     description: 'Cross-board join: for "Won" deals, checks whether a matching Work Order exists (matched by deal name / client code). Answers questions like "are we executing on what we sell?" or "which won deals haven\'t kicked off yet".',
-    input_schema: { type: 'object', properties: {} },
+    parameters: { type: SchemaType.OBJECT, properties: {} },
   },
   {
     name: 'build_leadership_snapshot',
     description: 'Builds a structured leadership-ready snapshot: pipeline by stage & sector, execution status breakdown, billing/collection health, and top data-quality caveats. Use when asked to prepare a leadership/exec update.',
-    input_schema: { type: 'object', properties: {} },
+    parameters: { type: SchemaType.OBJECT, properties: {} },
   },
 ];
 
 async function runTool(name, input) {
+  input = input || {};
+
   if (name === 'summarize_deals') {
     const deals = await ds.getDeals();
     const filtered = ds.applyFilters(deals, input);
@@ -104,7 +109,7 @@ async function runTool(name, input) {
 
   if (name === 'summarize_work_orders') {
     const wos = await ds.getWorkOrders();
-    const filtered = ds.applyFilters(wos, { ...input, status: input.status }).filter((r) => {
+    const filtered = ds.applyFilters(wos, input).filter((r) => {
       if (input.status && (r.executionStatus || '').toLowerCase() !== input.status.toLowerCase()) return false;
       return true;
     });
@@ -163,38 +168,46 @@ async function runTool(name, input) {
   throw new Error(`Unknown tool: ${name}`);
 }
 
+// Gemini's chat history uses {role: 'user'|'model', parts: [...]}. Our
+// frontend sends {role: 'user'|'assistant', content: string} -- translate.
+function toGeminiHistory(history) {
+  return history.map((m) => ({
+    role: m.role === 'assistant' ? 'model' : 'user',
+    parts: [{ text: m.content }],
+  }));
+}
+
 async function chat(history) {
-  // history: [{role: 'user'|'assistant', content: string}, ...]
-  const messages = history.map((m) => ({ role: m.role, content: m.content }));
+  const model = genAI.getGenerativeModel({
+    model: MODEL,
+    systemInstruction: SYSTEM_PROMPT,
+    tools: [{ functionDeclarations: TOOLS }],
+  });
+
+  const geminiHistory = toGeminiHistory(history);
+  const lastUserMsg = geminiHistory.pop(); // last turn sent via sendMessage, rest is history
+  const session = model.startChat({ history: geminiHistory });
+
+  let result = await session.sendMessage(lastUserMsg.parts);
 
   // Agentic tool-use loop, capped so a confused model can't spin forever.
   for (let turn = 0; turn < 6; turn += 1) {
-    const response = await client.messages.create({
-      model: MODEL,
-      max_tokens: 1500,
-      system: SYSTEM_PROMPT,
-      tools: TOOLS,
-      messages,
-    });
-
-    const toolUses = response.content.filter((b) => b.type === 'tool_use');
-    if (toolUses.length === 0) {
-      const text = response.content.filter((b) => b.type === 'text').map((b) => b.text).join('\n');
-      return { reply: text, mockMode: ds.isMockMode() };
+    const calls = result.response.functionCalls();
+    if (!calls || calls.length === 0) {
+      return { reply: result.response.text(), mockMode: ds.isMockMode() };
     }
 
-    messages.push({ role: 'assistant', content: response.content });
-    const toolResults = [];
-    for (const use of toolUses) {
-      let result;
+    const functionResponses = [];
+    for (const call of calls) {
+      let output;
       try {
-        result = await runTool(use.name, use.input || {});
+        output = await runTool(call.name, call.args);
       } catch (err) {
-        result = { error: err.message };
+        output = { error: err.message };
       }
-      toolResults.push({ type: 'tool_result', tool_use_id: use.id, content: JSON.stringify(result) });
+      functionResponses.push({ functionResponse: { name: call.name, response: output } });
     }
-    messages.push({ role: 'user', content: toolResults });
+    result = await session.sendMessage(functionResponses);
   }
 
   return { reply: "I wasn't able to settle on an answer within my tool-call budget -- try narrowing the question.", mockMode: ds.isMockMode() };
